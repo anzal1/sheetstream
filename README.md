@@ -91,11 +91,11 @@ Resolves to `[{ name, index }]`.
 
 ## Memory versus convenience
 
-Streaming is the default and the only thing the library does on its own. `toArray()` exists because sometimes you want the whole sheet, but it holds every row in V8 memory. As a rough guide, a million rows of ten mixed columns is on the order of a gigabyte of JS heap, and large sheets will hit Node's heap limit. Prefer the async iterator and process each batch as it arrives.
+Streaming is the default and the only thing the library does on its own. `toArray()` exists because sometimes you want the whole sheet, but it holds every row in V8 memory. Measured here, `toArray()` on the million-row benchmark file peaked at about 590 MB of RSS with `header: false`, and object rows cost more. Sheets much larger than that will hit Node's heap limit. Prefer the async iterator and process each batch as it arrives.
 
 Memory you should still expect:
 
-- Writing in `'constant'` mode holds one batch plus a small zip buffer. The sheet XML goes to a temp file (roughly 6 to 8 times the final file size) before it is compressed into the output, so the temp directory needs the disk space.
+- Writing in `'constant'` mode holds one batch plus a small zip buffer. The sheet XML goes to a temp file (about 5 times the final file size, 525 MB for the million-row benchmark file) before it is compressed into the output, so the temp directory needs the disk space.
 - Writing in `'lowMemory'` mode also keeps the table of distinct strings in RAM. It is cheap for repeated values and costly for a million unique strings.
 - Reading holds the file's shared strings table in RAM (the whole table, not just the strings in the current batch). Files written in `'constant'` mode have none.
 - `xlsxStream` and `toBuffer` write to a temp file, so disk, not RAM, is the cost.
