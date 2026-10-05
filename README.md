@@ -1,6 +1,8 @@
 # sheetstream
 
-Read and write XLSX files of any size from Node.js and Bun without ever holding all the rows in JavaScript.
+Read and write XLSX files of any size from Node.js without ever holding all the rows in JavaScript.
+
+Status: v0.1, not on npm yet. The API below works and is tested on macOS; prebuilt binaries for the other platforms come from CI on the first release. Bun should work through its napi support but isn't tested yet.
 
 Native code (Rust, through napi-rs) does the parsing and zipping. Rows go in and out in batches of 1000 by default, so a million-row file costs tens of megabytes, not gigabytes.
 
@@ -10,7 +12,7 @@ Native code (Rust, through napi-rs) does the parsing and zipping. Rows go in and
 npm install sheetstream
 ```
 
-Prebuilt binaries ship for macOS (arm64, x64), Linux (x64 glibc, x64 musl, arm64 glibc) and Windows (x64). There is nothing to compile on install.
+Once released, prebuilt binaries ship for macOS (arm64, x64), Linux (x64 glibc, x64 musl, arm64 glibc) and Windows (x64), so there is nothing to compile on install.
 
 ## Usage
 
