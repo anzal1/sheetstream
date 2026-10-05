@@ -1,0 +1,11 @@
+node_modules/
+target/
+*.node
+binding.js
+binding.d.ts
+/tmp/
+bench/data/
+bench/out/
+npm/
+*.xlsx
+!test/fixtures/*.xlsx
