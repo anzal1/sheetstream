@@ -313,7 +313,9 @@ unsafe fn read_string<'a>(env: sys::napi_env, v: sys::napi_value, buf: &'a mut V
             sys::napi_get_value_string_utf8(env, v, buf.as_mut_ptr() as *mut _, buf.len(), &mut written),
             "get_string",
         )?;
-        if written + 1 < buf.len() {
+        // napi never splits a character, so a truncated copy can fall up to 3 bytes short of
+        // the buffer end; anything within 4 bytes of it gets re-measured.
+        if written + 4 < buf.len() {
             // napi guarantees well-formed UTF-8 (lone surrogates become U+FFFD).
             return Ok(std::str::from_utf8_unchecked(&buf[..written]));
         }
@@ -323,7 +325,7 @@ unsafe fn read_string<'a>(env: sys::napi_env, v: sys::napi_value, buf: &'a mut V
             sys::napi_get_value_string_utf8(env, v, ptr::null_mut(), 0, &mut need),
             "get_string_len",
         )?;
-        buf.resize(need + 1, 0);
+        buf.resize(need + 5, 0);
     }
 }
 
