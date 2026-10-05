@@ -1,0 +1,181 @@
+name: CI
+
+# Builds prebuilt binaries for the six supported targets, tests them on the
+# runners that can execute them, and (only on a version tag) publishes.
+# Nothing here runs until the repository exists on GitHub.
+
+env:
+  DEBUG: napi:*
+  APP_NAME: sheetstream
+  MACOSX_DEPLOYMENT_TARGET: '11.0'
+
+permissions:
+  contents: read
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: build ${{ matrix.settings.target }}
+    runs-on: ${{ matrix.settings.host }}
+    strategy:
+      fail-fast: false
+      matrix:
+        settings:
+          - target: aarch64-apple-darwin
+            host: macos-latest
+            build: npx napi build --platform --release --target aarch64-apple-darwin --js binding.js --dts binding.d.ts
+          - target: x86_64-apple-darwin
+            host: macos-latest
+            build: npx napi build --platform --release --target x86_64-apple-darwin --js binding.js --dts binding.d.ts
+          - target: x86_64-unknown-linux-gnu
+            host: ubuntu-latest
+            build: npx napi build --platform --release --target x86_64-unknown-linux-gnu --use-napi-cross --js binding.js --dts binding.d.ts
+          - target: x86_64-unknown-linux-musl
+            host: ubuntu-latest
+            build: npx napi build --platform --release --target x86_64-unknown-linux-musl --cross-compile --js binding.js --dts binding.d.ts
+          - target: aarch64-unknown-linux-gnu
+            host: ubuntu-latest
+            build: npx napi build --platform --release --target aarch64-unknown-linux-gnu --use-napi-cross --js binding.js --dts binding.d.ts
+          - target: x86_64-pc-windows-msvc
+            host: windows-latest
+            build: npx napi build --platform --release --target x86_64-pc-windows-msvc --js binding.js --dts binding.d.ts
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install Rust target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.settings.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.settings.target }}
+      - uses: mlugg/setup-zig@v2
+        if: ${{ matrix.settings.target == 'x86_64-unknown-linux-musl' }}
+        with:
+          version: 0.14.1
+      - name: Install dependencies
+        run: npm install
+      - name: Build
+        run: ${{ matrix.settings.build }}
+        shell: bash
+      - name: Upload binding
+        uses: actions/upload-artifact@v4
+        with:
+          name: bindings-${{ matrix.settings.target }}
+          path: |
+            ${{ env.APP_NAME }}.*.node
+            binding.js
+            binding.d.ts
+          if-no-files-found: error
+
+  test:
+    name: test ${{ matrix.settings.target }} node ${{ matrix.node }}
+    needs: build
+    runs-on: ${{ matrix.settings.host }}
+    strategy:
+      fail-fast: false
+      matrix:
+        settings:
+          - target: aarch64-apple-darwin
+            host: macos-latest
+          - target: x86_64-unknown-linux-gnu
+            host: ubuntu-latest
+          - target: x86_64-pc-windows-msvc
+            host: windows-latest
+        node: ['20', '22', '24']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - name: Install dependencies
+        run: npm install
+      - name: Download binding
+        uses: actions/download-artifact@v4
+        with:
+          name: bindings-${{ matrix.settings.target }}
+          path: .
+      - name: Test
+        run: npm test
+        shell: bash
+
+  # Runs the musl build inside Alpine to confirm the binary loads there.
+  test-linux-x64-musl:
+    name: test x86_64-unknown-linux-musl
+    needs: build
+    runs-on: ubuntu-latest
+    container: node:22-alpine
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: npm install
+      - uses: actions/download-artifact@v4
+        with:
+          name: bindings-x86_64-unknown-linux-musl
+          path: .
+      - name: Test
+        run: npm test
+
+  # Runs the arm64 glibc build under QEMU.
+  test-linux-arm64-gnu:
+    name: test aarch64-unknown-linux-gnu
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: bindings-aarch64-unknown-linux-gnu
+          path: .
+      - uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+      - name: Test
+        run: |
+          docker run --rm --platform linux/arm64 -v "$PWD":/work -w /work node:22-slim \
+            sh -c "npm install && npm test"
+
+  publish:
+    name: publish
+    # Only runs for a version tag such as v0.1.0, and only if every build and test job passed.
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [test, test-linux-x64-musl, test-linux-arm64-gnu]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          registry-url: https://registry.npmjs.org
+      - name: Install dependencies
+        run: npm install
+      - name: Download all bindings
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Prepare npm packages
+        run: |
+          npx napi create-npm-dirs
+          npx napi artifacts --output-dir artifacts
+          ls -R npm
+      - name: Publish
+        run: npm publish --access public --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

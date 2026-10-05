@@ -1,9 +1,9 @@
 {
   "meta": {
     "date": "2026-10-05",
-    "rows": 100000,
+    "rows": 1000000,
     "cols": 10,
-    "capSeconds": 60,
+    "capSeconds": 90,
     "node": "v24.20.0",
     "platform": "darwin-arm64",
     "cpu": "Apple M5 Max",
@@ -11,7 +11,7 @@
     "versions": {
       "sheetstream": "0.1.0",
       "exceljs": "4.4.0",
-      "xlsx": "?"
+      "xlsx": "0.20.3"
     }
   },
   "results": [
@@ -19,73 +19,73 @@
       "case": "write:sheetstream-constant",
       "status": "ok",
       "detail": "",
-      "seconds": 0.62,
-      "rssMB": 81,
-      "fileMB": 11.1,
-      "rows": 100000
+      "seconds": 5.45,
+      "rssMB": 82,
+      "fileMB": 110.9,
+      "rows": 1000000
     },
     {
       "case": "write:sheetstream-lowMemory",
       "status": "ok",
       "detail": "",
-      "seconds": 0.64,
-      "rssMB": 103,
-      "fileMB": 7.7,
-      "rows": 100000
+      "seconds": 5.36,
+      "rssMB": 101,
+      "fileMB": 68.6,
+      "rows": 1000000
     },
     {
       "case": "write:exceljs-default",
-      "status": "ok",
-      "detail": "",
-      "seconds": 3.13,
-      "rssMB": 1605,
-      "fileMB": 7.8,
-      "rows": 100000
+      "status": "crash",
+      "detail": "JavaScript heap out of memory",
+      "seconds": 19,
+      "rssMB": null,
+      "fileMB": null,
+      "rows": null
     },
     {
       "case": "write:exceljs-streaming",
       "status": "ok",
       "detail": "",
-      "seconds": 1.42,
-      "rssMB": 289,
-      "fileMB": 8.7,
-      "rows": 100000
+      "seconds": 12.26,
+      "rssMB": 749,
+      "fileMB": 78.1,
+      "rows": 1000000
     },
     {
       "case": "write:sheetjs-dense",
       "status": "ok",
       "detail": "",
-      "seconds": 0.96,
-      "rssMB": 551,
-      "fileMB": 21.3,
-      "rows": 100000
+      "seconds": 9.13,
+      "rssMB": 3270,
+      "fileMB": 214.9,
+      "rows": 1000000
     },
     {
       "case": "read:sheetstream",
       "status": "ok",
       "detail": "",
-      "seconds": 0.27,
-      "rssMB": 79,
+      "seconds": 2.44,
+      "rssMB": 93,
       "fileMB": null,
-      "rows": 100000
+      "rows": 1000000
     },
     {
       "case": "read:exceljs-streaming",
       "status": "ok",
       "detail": "",
-      "seconds": 0.96,
-      "rssMB": 295,
+      "seconds": 9.05,
+      "rssMB": 376,
       "fileMB": null,
-      "rows": 100000
+      "rows": 1000000
     },
     {
       "case": "read:sheetjs-dense",
       "status": "ok",
       "detail": "",
-      "seconds": 1.64,
-      "rssMB": 554,
+      "seconds": 16.27,
+      "rssMB": 3048,
       "fileMB": null,
-      "rows": 100000
+      "rows": 1000000
     }
   ]
 }
