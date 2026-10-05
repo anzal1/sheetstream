@@ -1,0 +1,91 @@
+{
+  "meta": {
+    "date": "2026-10-05",
+    "rows": 100000,
+    "cols": 10,
+    "capSeconds": 60,
+    "node": "v24.20.0",
+    "platform": "darwin-arm64",
+    "cpu": "Apple M5 Max",
+    "cores": 18,
+    "versions": {
+      "sheetstream": "0.1.0",
+      "exceljs": "4.4.0",
+      "xlsx": "?"
+    }
+  },
+  "results": [
+    {
+      "case": "write:sheetstream-constant",
+      "status": "ok",
+      "detail": "",
+      "seconds": 0.62,
+      "rssMB": 81,
+      "fileMB": 11.1,
+      "rows": 100000
+    },
+    {
+      "case": "write:sheetstream-lowMemory",
+      "status": "ok",
+      "detail": "",
+      "seconds": 0.64,
+      "rssMB": 103,
+      "fileMB": 7.7,
+      "rows": 100000
+    },
+    {
+      "case": "write:exceljs-default",
+      "status": "ok",
+      "detail": "",
+      "seconds": 3.13,
+      "rssMB": 1605,
+      "fileMB": 7.8,
+      "rows": 100000
+    },
+    {
+      "case": "write:exceljs-streaming",
+      "status": "ok",
+      "detail": "",
+      "seconds": 1.42,
+      "rssMB": 289,
+      "fileMB": 8.7,
+      "rows": 100000
+    },
+    {
+      "case": "write:sheetjs-dense",
+      "status": "ok",
+      "detail": "",
+      "seconds": 0.96,
+      "rssMB": 551,
+      "fileMB": 21.3,
+      "rows": 100000
+    },
+    {
+      "case": "read:sheetstream",
+      "status": "ok",
+      "detail": "",
+      "seconds": 0.27,
+      "rssMB": 79,
+      "fileMB": null,
+      "rows": 100000
+    },
+    {
+      "case": "read:exceljs-streaming",
+      "status": "ok",
+      "detail": "",
+      "seconds": 0.96,
+      "rssMB": 295,
+      "fileMB": null,
+      "rows": 100000
+    },
+    {
+      "case": "read:sheetjs-dense",
+      "status": "ok",
+      "detail": "",
+      "seconds": 1.64,
+      "rssMB": 554,
+      "fileMB": null,
+      "rows": 100000
+    }
+  ]
+}
