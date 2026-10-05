@@ -41,7 +41,7 @@
     "build:debug": "napi build --platform --js binding.js --dts binding.d.ts",
     "artifacts": "napi artifacts",
     "prepublishOnly": "napi prepublish -t npm",
-    "test": "node --test test/*.test.mjs",
+    "test": "node --test",
     "bench": "node bench/run.mjs"
   },
   "devDependencies": {

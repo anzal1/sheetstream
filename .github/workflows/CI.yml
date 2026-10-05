@@ -129,24 +129,24 @@ jobs:
       - name: Test
         run: npm test
 
-  # Runs the arm64 glibc build under QEMU.
+  # Native arm64 runner (free for public repos). Emulating arm64 under QEMU made
+  # the timing and memory checks meaningless.
   test-linux-arm64-gnu:
     name: test aarch64-unknown-linux-gnu
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
       - uses: actions/download-artifact@v4
         with:
           name: bindings-aarch64-unknown-linux-gnu
           path: .
-      - uses: docker/setup-qemu-action@v3
-        with:
-          platforms: arm64
+      - run: npm ci
       - name: Test
-        run: |
-          docker run --rm --platform linux/arm64 -v "$PWD":/work -w /work node:22-slim \
-            sh -c "npm install && npm test"
+        run: npm test
 
   publish:
     name: publish
