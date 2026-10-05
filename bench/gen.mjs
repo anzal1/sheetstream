@@ -12,9 +12,10 @@ export const POOL = 20000
 function poolStr(c, i) {
   const base = (SEED + Math.imul(i, 7) + Math.imul(c, 1000003)) >>> 0
   const len = 5 + (h(base) % 16)
-  let s = ''
-  for (let k = 0; k < len; k++) s += ALPHA[h((base + Math.imul(k, 31) + 1) >>> 0) % 36]
-  return s
+  // Build from char codes so each string is flat from the start (no rope garbage).
+  const codes = new Array(len)
+  for (let k = 0; k < len; k++) codes[k] = ALPHA.charCodeAt(h((base + Math.imul(k, 31) + 1) >>> 0) % 36)
+  return String.fromCharCode.apply(null, codes)
 }
 const pools = []
 for (let c = 2; c < 8; c++) {
