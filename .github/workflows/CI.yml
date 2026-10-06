@@ -1,8 +1,10 @@
 name: CI
 
-# Builds prebuilt binaries for the six supported targets, tests them on the
-# runners that can execute them, and (only on a version tag) publishes.
-# Nothing here runs until the repository exists on GitHub.
+# Builds prebuilt binaries for the six supported targets and tests them on the
+# runners that can execute them. On main, once everything passes, it publishes
+# to npm if the version in package.json is not on npm yet, so releasing is just
+# bumping the version. Publishing uses npm trusted publishing (OIDC), so there
+# is no token in the repo.
 
 env:
   DEBUG: napi:*
@@ -15,12 +17,12 @@ permissions:
 on:
   push:
     branches: [main]
-    tags: ['v*']
   pull_request:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Never cancel a run on main, it may be mid-publish.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   build:
@@ -147,3 +149,56 @@ jobs:
       - run: npm ci
       - name: Test
         run: npm test
+
+  publish:
+    name: publish
+    needs: [build, test, test-linux-x64-musl, test-linux-arm64-gnu]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Is this version already on npm?
+        id: check
+        run: |
+          NAME=$(node -p "require('./package.json').name")
+          VER=$(node -p "require('./package.json').version")
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          if [ -n "$(npm view "$NAME@$VER" version 2>/dev/null)" ]; then
+            echo "$NAME@$VER is already published, nothing to do"
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/download-artifact@v4
+        if: steps.check.outputs.publish == 'true'
+        with:
+          pattern: bindings-*
+          path: artifacts
+      - name: Collect the six binaries
+        if: steps.check.outputs.publish == 'true'
+        run: |
+          cp artifacts/*/${APP_NAME}.*.node .
+          ls -l ${APP_NAME}.*.node
+          test "$(ls ${APP_NAME}.*.node | wc -l)" -eq 6
+      - name: Publish
+        if: steps.check.outputs.publish == 'true'
+        run: |
+          npm install -g npm@latest
+          case "${{ steps.check.outputs.version }}" in
+            *-*) npm publish --access public --tag next ;;
+            *)   npm publish --access public ;;
+          esac
+      - name: GitHub release
+        if: steps.check.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          V="v${{ steps.check.outputs.version }}"
+          case "$V" in *-*) PRE=--prerelease ;; *) PRE= ;; esac
+          gh release create "$V" --target "$GITHUB_SHA" --generate-notes $PRE
