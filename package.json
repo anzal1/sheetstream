@@ -2,6 +2,14 @@
   "name": "sheetstream",
   "version": "0.1.0",
   "description": "Streaming XLSX read and write for Node.js and Bun, written in Rust. Never holds all rows in JS.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/anzal1/sheetstream.git"
+  },
+  "homepage": "https://github.com/anzal1/sheetstream#readme",
+  "bugs": {
+    "url": "https://github.com/anzal1/sheetstream/issues"
+  },
   "license": "MIT",
   "author": "Anzal Abidi",
   "main": "index.js",
@@ -18,10 +26,18 @@
     "index.d.ts",
     "binding.js",
     "binding.d.ts",
+    "sheetstream.*.node",
     "LICENSE",
     "README.md"
   ],
-  "keywords": ["xlsx", "excel", "spreadsheet", "streaming", "napi-rs", "rust"],
+  "keywords": [
+    "xlsx",
+    "excel",
+    "spreadsheet",
+    "streaming",
+    "napi-rs",
+    "rust"
+  ],
   "engines": {
     "node": ">= 18"
   },
@@ -40,7 +56,6 @@
     "build": "napi build --platform --release --js binding.js --dts binding.d.ts",
     "build:debug": "napi build --platform --js binding.js --dts binding.d.ts",
     "artifacts": "napi artifacts",
-    "prepublishOnly": "napi prepublish -t npm",
     "test": "node --test",
     "bench": "node bench/run.mjs"
   },
