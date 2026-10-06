@@ -38,6 +38,8 @@ for await (const batch of readXlsx('users.xlsx')) {
 
 More in [examples/](examples/): streaming an HTTP response, multiple sheets, a million-row round trip.
 
+Copy-paste recipes for Express, Next.js, Hono, NestJS, Postgres cursors and large uploads are in [docs/recipes.md](docs/recipes.md).
+
 ## API
 
 ```ts
