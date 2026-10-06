@@ -2,6 +2,10 @@
 
 Read and write XLSX files of any size from Node.js without ever holding all the rows in JavaScript.
 
+![Writing 1M rows to xlsx: sheetstream 82 MB, exceljs streaming 749 MB, SheetJS 3.3 GB, exceljs default crashes](assets/memory.png)
+
+![exceljs runs out of heap at 1 GB while sheetstream writes 1M rows in 79 MB](assets/demo.gif)
+
 v0.1. Prebuilt binaries for macOS (arm64, x64), Linux (x64 glibc, x64 musl, arm64 glibc) and Windows (x64) ship inside the package, so there is nothing to compile on install. Bun should work through its napi support but isn't tested yet. Not built yet: Linux arm64 with musl (Alpine on ARM).
 
 Native code (Rust, through napi-rs) does the parsing and zipping. Rows go in and out in batches of 1000 by default, so a million-row file costs tens of megabytes, not gigabytes.
