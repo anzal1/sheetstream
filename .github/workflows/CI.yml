@@ -163,6 +163,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
+          registry-url: https://registry.npmjs.org
       - name: Is this version already on npm?
         id: check
         run: |
@@ -188,6 +189,8 @@ jobs:
           test "$(ls ${APP_NAME}.*.node | wc -l)" -eq 6
       - name: Publish
         if: steps.check.outputs.publish == 'true'
+        env:
+          NPM_CONFIG_LOGLEVEL: verbose
         run: |
           npm install -g npm@latest
           case "${{ steps.check.outputs.version }}" in
