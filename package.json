@@ -1,7 +1,7 @@
 {
   "name": "sheetstream",
-  "version": "0.1.0",
-  "description": "Streaming XLSX read and write for Node.js and Bun, written in Rust. Never holds all rows in JS.",
+  "version": "0.2.0",
+  "description": "Streaming XLSX and CSV read and write for Node.js and Bun, written in Rust. Never holds all rows in JS.",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/anzal1/sheetstream.git"
@@ -32,6 +32,7 @@
   ],
   "keywords": [
     "xlsx",
+    "csv",
     "excel",
     "spreadsheet",
     "streaming",
@@ -62,6 +63,7 @@
   "devDependencies": {
     "@napi-rs/cli": "3.10.6",
     "exceljs": "^4.4.0",
+    "jszip": "^3.10.2",
     "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz"
   }
 }

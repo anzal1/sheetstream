@@ -7,37 +7,293 @@ use std::ptr;
 use napi::{sys, Env, Error, JsValue, Result, Status, Task};
 use napi::bindgen_prelude::{Array, AsyncTask};
 use napi_derive::napi;
-use rust_xlsxwriter::{Format, Workbook, Worksheet};
+use rust_xlsxwriter::{Color, Format, FormatBorder, Workbook, Worksheet};
 
 const MS_PER_DAY: f64 = 86_400_000.0;
 const UNIX_EPOCH_SERIAL: f64 = 25_569.0;
 const MAX_SAFE: i64 = 9_007_199_254_740_991;
 
 #[derive(Clone, Copy, PartialEq)]
-enum Kind {
+pub(crate) enum Kind {
     Unknown,
     Array,
     Object,
 }
 
-struct Sheet {
-    columns: Option<Vec<String>>,
+/// Row bookkeeping shared by the XLSX and CSV writers.
+pub(crate) struct Core {
+    /// Property keys for object rows (and the header text unless `headers` is set).
+    pub columns: Option<Vec<String>>,
+    /// Header text per column, when it differs from the keys.
+    pub headers: Option<Vec<String>>,
     /// None = decide from the first row (header for object rows only).
-    header: Option<bool>,
-    header_done: bool,
-    next_row: u32,
-    kind: Kind,
-    rows: u64,
+    pub header: Option<bool>,
+    pub started: bool,
+    pub header_written: bool,
+    pub header_row: u32,
+    pub next_row: u32,
+    pub kind: Kind,
+    pub rows: u64,
+}
+
+impl Core {
+    pub fn new(columns: Option<Vec<String>>, headers: Option<Vec<String>>, header: Option<bool>) -> Self {
+        Core { columns, headers, header, started: false, header_written: false, header_row: 0, next_row: 0, kind: Kind::Unknown, rows: 0 }
+    }
+
+    fn header_texts(&self) -> Vec<String> {
+        match (&self.headers, &self.columns) {
+            (Some(h), Some(c)) => (0..c.len()).map(|i| h.get(i).unwrap_or(&c[i]).clone()).collect(),
+            (None, Some(c)) => c.clone(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// One-time setup before the first cell: lets the sink configure the sheet, then writes the header row.
+    pub fn start<S: Sink>(&mut self, sink: &mut S, want_header: bool) -> Result<()> {
+        self.started = true;
+        let will_header = want_header && self.columns.is_some();
+        sink.begin(self, will_header)?;
+        if will_header {
+            let texts = self.header_texts();
+            sink.header(self.next_row, &texts)?;
+            sink.end_row()?;
+            self.header_row = self.next_row;
+            self.next_row += 1;
+            self.rows += 1;
+            self.header_written = true;
+        }
+        Ok(())
+    }
+}
+
+/// Where cells go: an xlsx worksheet or a CSV record stream.
+pub(crate) trait Sink {
+    /// Called once before the first cell is written.
+    fn begin(&mut self, core: &Core, will_header: bool) -> Result<()>;
+    fn header(&mut self, row: u32, texts: &[String]) -> Result<()>;
+    /// # Safety
+    /// `env` and `v` must be valid for the current N-API call.
+    unsafe fn cell(&mut self, env: sys::napi_env, buf: &mut Vec<u8>, r: u32, c: u32, v: sys::napi_value) -> Result<()>;
+    /// Called after every row (header and blank rows included).
+    fn end_row(&mut self) -> Result<()>;
+}
+
+/// Walks a batch of rows (arrays or plain objects) and feeds a sink.
+pub(crate) fn drive_rows<S: Sink>(
+    env: &Env,
+    core: &mut Core,
+    sink: &mut S,
+    strbuf: &mut Vec<u8>,
+    rows: Array,
+) -> Result<u32> {
+    let raw_env = env.raw();
+    let arr = rows.value().value;
+    let n = rows.len();
+    // Property keys for object rows, created once per batch.
+    let mut keys: Vec<sys::napi_value> = Vec::new();
+    let mut keys_ready = false;
+
+    for i in 0..n {
+        let row = unsafe { get_element(raw_env, arr, i)? };
+        let t = unsafe { type_of(raw_env, row)? };
+        if t == sys::ValueType::napi_undefined || t == sys::ValueType::napi_null {
+            // A hole in the input: keep an empty row so row numbers stay aligned.
+            core.next_row += 1;
+            core.rows += 1;
+            sink.end_row()?;
+            continue;
+        }
+        let is_arr = unsafe { is_array(raw_env, row)? };
+        let kind = if is_arr {
+            Kind::Array
+        } else if t == sys::ValueType::napi_object {
+            Kind::Object
+        } else {
+            return Err(invalid(format!("row {} is not an array or object", core.next_row + 1)));
+        };
+        if core.kind == Kind::Unknown {
+            core.kind = kind;
+            if kind == Kind::Object && core.columns.is_none() {
+                core.columns = Some(unsafe { own_keys(raw_env, row, strbuf)? });
+            }
+            let want_header = core.header.unwrap_or(kind == Kind::Object);
+            core.start(sink, want_header)?;
+        }
+        if core.kind != kind {
+            return Err(invalid(format!("row {} mixes arrays and objects in one sheet", core.next_row + 1)));
+        }
+        let r = core.next_row;
+        if kind == Kind::Array {
+            let len = unsafe { array_len(raw_env, row)? };
+            for c in 0..len {
+                let v = unsafe { get_element(raw_env, row, c)? };
+                unsafe { sink.cell(raw_env, strbuf, r, c, v)? };
+            }
+        } else {
+            if !keys_ready {
+                for name in core.columns.as_ref().unwrap() {
+                    keys.push(unsafe { create_string(raw_env, name)? });
+                }
+                keys_ready = true;
+            }
+            for (c, key) in keys.iter().enumerate() {
+                let v = unsafe { get_property(raw_env, row, *key)? };
+                unsafe { sink.cell(raw_env, strbuf, r, c as u32, v)? };
+            }
+        }
+        sink.end_row()?;
+        core.next_row += 1;
+        core.rows += 1;
+    }
+    Ok(n)
+}
+
+/// Per-column worksheet formatting, taken from `columns: [{ key, width, numFmt }]`.
+#[napi(object)]
+pub struct NativeColumn {
+    pub width: Option<f64>,
+    pub num_fmt: Option<String>,
+}
+
+#[napi(object)]
+pub struct NativeSheetOptions {
+    /// Header text per column when it differs from the keys.
+    pub headers: Option<Vec<String>>,
+    pub column_formats: Option<Vec<NativeColumn>>,
+    pub header_bold: Option<bool>,
+    /// 0xRRGGBB
+    pub header_fill: Option<u32>,
+    /// 0xRRGGBB
+    pub header_font_color: Option<u32>,
+    pub header_border: Option<bool>,
+    pub freeze_header: Option<bool>,
+    pub auto_filter: Option<bool>,
+}
+
+struct ColFmt {
+    width: Option<f64>,
+    fmt: Option<Format>,
+}
+
+/// Everything formatting-related for one sheet. Built once in `add_sheet`; nothing here grows with the row count.
+struct SheetFmt {
+    cols: Vec<ColFmt>,
+    header_fmt: Option<Format>,
+    freeze_header: bool,
+    auto_filter: bool,
+}
+
+impl SheetFmt {
+    fn plain() -> Self {
+        SheetFmt { cols: Vec::new(), header_fmt: None, freeze_header: false, auto_filter: false }
+    }
+
+    fn from_options(o: &NativeSheetOptions) -> Self {
+        let cols = o
+            .column_formats
+            .iter()
+            .flatten()
+            .map(|c| ColFmt {
+                width: c.width,
+                fmt: c.num_fmt.as_ref().map(|f| Format::new().set_num_format(f.as_str())),
+            })
+            .collect();
+        let styled = o.header_bold == Some(true)
+            || o.header_fill.is_some()
+            || o.header_font_color.is_some()
+            || o.header_border == Some(true);
+        let header_fmt = styled.then(|| {
+            let mut f = Format::new();
+            if o.header_bold == Some(true) {
+                f = f.set_bold();
+            }
+            if let Some(rgb) = o.header_fill {
+                f = f.set_background_color(Color::RGB(rgb));
+            }
+            if let Some(rgb) = o.header_font_color {
+                f = f.set_font_color(Color::RGB(rgb));
+            }
+            if o.header_border == Some(true) {
+                f = f.set_border(FormatBorder::Thin);
+            }
+            f
+        });
+        SheetFmt {
+            cols,
+            header_fmt,
+            freeze_header: o.freeze_header == Some(true),
+            auto_filter: o.auto_filter == Some(true),
+        }
+    }
+
+    fn col_has_fmt(&self, c: u32) -> bool {
+        self.cols.get(c as usize).is_some_and(|f| f.fmt.is_some())
+    }
+}
+
+struct SheetEntry {
+    core: Core,
+    fmt: SheetFmt,
 }
 
 struct State {
     wb: Workbook,
     path: String,
     constant: bool,
-    sheets: Vec<Sheet>,
+    sheets: Vec<SheetEntry>,
     date_fmt: Format,
     datetime_fmt: Format,
     strbuf: Vec<u8>,
+}
+
+struct XlsxSink<'a> {
+    ws: &'a mut Worksheet,
+    fmt: &'a SheetFmt,
+    date_fmt: &'a Format,
+    datetime_fmt: &'a Format,
+}
+
+impl Sink for XlsxSink<'_> {
+    fn begin(&mut self, core: &Core, will_header: bool) -> Result<()> {
+        // Column widths and formats go into the <cols> element, which rust_xlsxwriter emits
+        // before the first row is flushed, so they work in constant-memory mode. Cells written
+        // without a format of their own pick up the column format at save time, at no per-cell cost.
+        for (c, spec) in self.fmt.cols.iter().enumerate() {
+            let c = u16::try_from(c).map_err(|_| invalid("too many columns (Excel allows 16384)".into()))?;
+            if let Some(w) = spec.width {
+                self.ws.set_column_width(c, w).map_err(xerr)?;
+            }
+            if let Some(f) = &spec.fmt {
+                self.ws.set_column_format(c, f).map_err(xerr)?;
+            }
+        }
+        if will_header && self.fmt.freeze_header {
+            self.ws.set_freeze_panes(core.next_row + 1, 0).map_err(xerr)?;
+        }
+        Ok(())
+    }
+
+    fn header(&mut self, row: u32, texts: &[String]) -> Result<()> {
+        for (c, name) in texts.iter().enumerate() {
+            let col = u16::try_from(c).map_err(|_| pos_err(row, c as u32, "too many columns (Excel allows 16384)"))?;
+            match &self.fmt.header_fmt {
+                Some(f) => self.ws.write_string_with_format(row, col, name.as_str(), f),
+                None => self.ws.write_string(row, col, name.as_str()),
+            }
+            .map_err(|e| pos_err(row, c as u32, &e.to_string()))?;
+        }
+        Ok(())
+    }
+
+    unsafe fn cell(&mut self, env: sys::napi_env, buf: &mut Vec<u8>, r: u32, c: u32, v: sys::napi_value) -> Result<()> {
+        let col_fmt = self.fmt.col_has_fmt(c);
+        write_cell(env, self.ws, self.date_fmt, self.datetime_fmt, col_fmt, buf, r, c, v)
+    }
+
+    fn end_row(&mut self) -> Result<()> {
+        Ok(())
+    }
 }
 
 #[napi(object)]
@@ -51,11 +307,11 @@ pub struct NativeWriter {
     state: Option<State>,
 }
 
-fn xerr(e: rust_xlsxwriter::XlsxError) -> Error {
+pub(crate) fn xerr(e: rust_xlsxwriter::XlsxError) -> Error {
     Error::new(Status::GenericFailure, e.to_string())
 }
 
-fn invalid(msg: String) -> Error {
+pub(crate) fn invalid(msg: String) -> Error {
     Error::new(Status::InvalidArg, msg)
 }
 
@@ -83,7 +339,13 @@ impl NativeWriter {
 
     /// Adds a sheet and returns its index.
     #[napi]
-    pub fn add_sheet(&mut self, name: String, columns: Option<Vec<String>>, header: Option<bool>) -> Result<u32> {
+    pub fn add_sheet(
+        &mut self,
+        name: String,
+        columns: Option<Vec<String>>,
+        header: Option<bool>,
+        options: Option<NativeSheetOptions>,
+    ) -> Result<u32> {
         let st = self.state.as_mut().ok_or_else(|| invalid("writer is closed".into()))?;
         let ws = if st.constant {
             st.wb.add_worksheet_with_constant_memory()
@@ -91,14 +353,11 @@ impl NativeWriter {
             st.wb.add_worksheet_with_low_memory()
         };
         ws.set_name(name).map_err(xerr)?;
-        st.sheets.push(Sheet {
-            columns,
-            header,
-            header_done: false,
-            next_row: 0,
-            kind: Kind::Unknown,
-            rows: 0,
-        });
+        let (fmt, headers) = match &options {
+            Some(o) => (SheetFmt::from_options(o), o.headers.clone()),
+            None => (SheetFmt::plain(), None),
+        };
+        st.sheets.push(SheetEntry { core: Core::new(columns, headers, header), fmt });
         Ok((st.sheets.len() - 1) as u32)
     }
 
@@ -106,77 +365,13 @@ impl NativeWriter {
     #[napi]
     pub fn write_rows(&mut self, env: &Env, sheet: u32, rows: Array) -> Result<u32> {
         let st = self.state.as_mut().ok_or_else(|| invalid("writer is closed".into()))?;
-        let raw_env = env.raw();
         let State { wb, sheets, date_fmt, datetime_fmt, strbuf, .. } = st;
-        let sh = sheets
+        let entry = sheets
             .get_mut(sheet as usize)
             .ok_or_else(|| invalid(format!("no sheet with index {sheet}")))?;
         let ws = wb.worksheet_from_index(sheet as usize).map_err(xerr)?;
-        let arr = rows.value().value;
-        let n = rows.len();
-        // Property keys for object rows, created once per batch.
-        let mut keys: Vec<sys::napi_value> = Vec::new();
-        let mut keys_ready = false;
-
-        for i in 0..n {
-            let row = unsafe { get_element(raw_env, arr, i)? };
-            let t = unsafe { type_of(raw_env, row)? };
-            if t == sys::ValueType::napi_undefined || t == sys::ValueType::napi_null {
-                // A hole in the input: keep an empty row so row numbers stay aligned.
-                sh.next_row += 1;
-                sh.rows += 1;
-                continue;
-            }
-            let is_arr = unsafe { is_array(raw_env, row)? };
-            let kind = if is_arr {
-                Kind::Array
-            } else if t == sys::ValueType::napi_object {
-                Kind::Object
-            } else {
-                return Err(invalid(format!(
-                    "row {} is not an array or object",
-                    sh.next_row + 1
-                )));
-            };
-            if sh.kind == Kind::Unknown {
-                sh.kind = kind;
-                if kind == Kind::Object && sh.columns.is_none() {
-                    sh.columns = Some(unsafe { own_keys(raw_env, row, strbuf)? });
-                }
-                let want_header = sh.header.unwrap_or(kind == Kind::Object);
-                if want_header && sh.columns.is_some() {
-                    write_header(ws, sh)?;
-                }
-            }
-            if sh.kind != kind {
-                return Err(invalid(format!(
-                    "row {} mixes arrays and objects in one sheet",
-                    sh.next_row + 1
-                )));
-            }
-            let r = sh.next_row;
-            if kind == Kind::Array {
-                let len = unsafe { array_len(raw_env, row)? };
-                for c in 0..len {
-                    let v = unsafe { get_element(raw_env, row, c)? };
-                    unsafe { write_cell(raw_env, ws, date_fmt, datetime_fmt, strbuf, r, c, v)? };
-                }
-            } else {
-                if !keys_ready {
-                    for name in sh.columns.as_ref().unwrap() {
-                        keys.push(unsafe { create_string(raw_env, name)? });
-                    }
-                    keys_ready = true;
-                }
-                for (c, key) in keys.iter().enumerate() {
-                    let v = unsafe { get_property(raw_env, row, *key)? };
-                    unsafe { write_cell(raw_env, ws, date_fmt, datetime_fmt, strbuf, r, c as u32, v)? };
-                }
-            }
-            sh.next_row += 1;
-            sh.rows += 1;
-        }
-        Ok(n)
+        let mut sink = XlsxSink { ws, fmt: &entry.fmt, date_fmt, datetime_fmt };
+        drive_rows(env, &mut entry.core, &mut sink, strbuf, rows)
     }
 
     /// Drops the workbook and its temp files without writing anything.
@@ -210,24 +405,27 @@ impl Task for CloseTask {
                 st.wb.add_worksheet_with_low_memory()
             };
             ws.set_name("Sheet1").map_err(xerr)?;
-            st.sheets.push(Sheet {
-                columns: None,
-                header: None,
-                header_done: false,
-                next_row: 0,
-                kind: Kind::Unknown,
-                rows: 0,
-            });
+            st.sheets.push(SheetEntry { core: Core::new(None, None, None), fmt: SheetFmt::plain() });
         }
-        // A sheet that got columns but no rows still gets its header row.
-        for idx in 0..st.sheets.len() {
-            let sh = &mut st.sheets[idx];
-            if !sh.header_done && sh.columns.is_some() && sh.header != Some(false) && sh.next_row == 0 {
-                let ws = st.wb.worksheet_from_index(idx).map_err(xerr)?;
-                write_header(ws, &mut st.sheets[idx])?;
+        let State { wb, sheets, date_fmt, datetime_fmt, .. } = &mut st;
+        for (idx, entry) in sheets.iter_mut().enumerate() {
+            let ws = wb.worksheet_from_index(idx).map_err(xerr)?;
+            let mut sink = XlsxSink { ws, fmt: &entry.fmt, date_fmt, datetime_fmt };
+            // A sheet that got columns but no rows still gets its header row.
+            if !entry.core.started {
+                let want = entry.core.header != Some(false) && entry.core.next_row == 0;
+                entry.core.start(&mut sink, want)?;
+            }
+            // The filter range needs the last row, which is only known now.
+            if entry.fmt.auto_filter && entry.core.header_written {
+                let last_col = entry.core.header_texts().len().saturating_sub(1);
+                let last_col = u16::try_from(last_col).map_err(|_| invalid("too many columns (Excel allows 16384)".into()))?;
+                let first_row = entry.core.header_row;
+                let last_row = entry.core.next_row.saturating_sub(1).max(first_row);
+                sink.ws.autofilter(first_row, 0, last_row, last_col).map_err(xerr)?;
             }
         }
-        let rows: u64 = st.sheets.iter().map(|s| s.rows).sum();
+        let rows: u64 = st.sheets.iter().map(|s| s.core.rows).sum();
         st.wb.save(&st.path).map_err(xerr)?;
         let bytes = std::fs::metadata(&st.path).map(|m| m.len()).unwrap_or(0);
         Ok(WriteResult { rows: rows as f64, bytes: bytes as f64 })
@@ -238,24 +436,9 @@ impl Task for CloseTask {
     }
 }
 
-fn write_header(ws: &mut Worksheet, sh: &mut Sheet) -> Result<()> {
-    if sh.header_done {
-        return Ok(());
-    }
-    if let Some(cols) = &sh.columns {
-        for (c, name) in cols.iter().enumerate() {
-            ws.write_string(sh.next_row, c as u16, name.as_str()).map_err(xerr)?;
-        }
-        sh.next_row += 1;
-        sh.rows += 1;
-    }
-    sh.header_done = true;
-    Ok(())
-}
-
 // ---- raw N-API helpers (hot path, kept thin on purpose) ----
 
-fn check(status: sys::napi_status, what: &str) -> Result<()> {
+pub(crate) fn check(status: sys::napi_status, what: &str) -> Result<()> {
     if status == sys::Status::napi_ok {
         Ok(())
     } else {
@@ -263,37 +446,37 @@ fn check(status: sys::napi_status, what: &str) -> Result<()> {
     }
 }
 
-unsafe fn get_element(env: sys::napi_env, arr: sys::napi_value, i: u32) -> Result<sys::napi_value> {
+pub(crate) unsafe fn get_element(env: sys::napi_env, arr: sys::napi_value, i: u32) -> Result<sys::napi_value> {
     let mut out = ptr::null_mut();
     check(sys::napi_get_element(env, arr, i, &mut out), "get_element")?;
     Ok(out)
 }
 
-unsafe fn get_property(env: sys::napi_env, obj: sys::napi_value, key: sys::napi_value) -> Result<sys::napi_value> {
+pub(crate) unsafe fn get_property(env: sys::napi_env, obj: sys::napi_value, key: sys::napi_value) -> Result<sys::napi_value> {
     let mut out = ptr::null_mut();
     check(sys::napi_get_property(env, obj, key, &mut out), "get_property")?;
     Ok(out)
 }
 
-unsafe fn type_of(env: sys::napi_env, v: sys::napi_value) -> Result<i32> {
+pub(crate) unsafe fn type_of(env: sys::napi_env, v: sys::napi_value) -> Result<i32> {
     let mut t = 0;
     check(sys::napi_typeof(env, v, &mut t), "typeof")?;
     Ok(t)
 }
 
-unsafe fn is_array(env: sys::napi_env, v: sys::napi_value) -> Result<bool> {
+pub(crate) unsafe fn is_array(env: sys::napi_env, v: sys::napi_value) -> Result<bool> {
     let mut b = false;
     check(sys::napi_is_array(env, v, &mut b), "is_array")?;
     Ok(b)
 }
 
-unsafe fn array_len(env: sys::napi_env, v: sys::napi_value) -> Result<u32> {
+pub(crate) unsafe fn array_len(env: sys::napi_env, v: sys::napi_value) -> Result<u32> {
     let mut n = 0u32;
     check(sys::napi_get_array_length(env, v, &mut n), "array_length")?;
     Ok(n)
 }
 
-unsafe fn create_string(env: sys::napi_env, s: &str) -> Result<sys::napi_value> {
+pub(crate) unsafe fn create_string(env: sys::napi_env, s: &str) -> Result<sys::napi_value> {
     let mut out = ptr::null_mut();
     check(
         sys::napi_create_string_utf8(env, s.as_ptr() as *const _, s.len() as _, &mut out),
@@ -303,7 +486,7 @@ unsafe fn create_string(env: sys::napi_env, s: &str) -> Result<sys::napi_value> 
 }
 
 /// Reads a JS string into `buf` (reused across calls) and returns it as &str.
-unsafe fn read_string<'a>(env: sys::napi_env, v: sys::napi_value, buf: &'a mut Vec<u8>) -> Result<&'a str> {
+pub(crate) unsafe fn read_string<'a>(env: sys::napi_env, v: sys::napi_value, buf: &'a mut Vec<u8>) -> Result<&'a str> {
     if buf.len() < 256 {
         buf.resize(256, 0);
     }
@@ -329,7 +512,7 @@ unsafe fn read_string<'a>(env: sys::napi_env, v: sys::napi_value, buf: &'a mut V
     }
 }
 
-unsafe fn own_keys(env: sys::napi_env, obj: sys::napi_value, buf: &mut Vec<u8>) -> Result<Vec<String>> {
+pub(crate) unsafe fn own_keys(env: sys::napi_env, obj: sys::napi_value, buf: &mut Vec<u8>) -> Result<Vec<String>> {
     let mut names = ptr::null_mut();
     check(
         sys::napi_get_all_property_names(
@@ -351,7 +534,7 @@ unsafe fn own_keys(env: sys::napi_env, obj: sys::napi_value, buf: &mut Vec<u8>) 
     Ok(out)
 }
 
-fn civil_from_days(z: i64) -> (i64, u32, u32) {
+pub(crate) fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let z = z + 719_468;
     let era = z.div_euclid(146_097);
     let doe = z.rem_euclid(146_097);
@@ -365,7 +548,7 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 }
 
 /// ISO-8601 text for dates Excel cannot hold (before 1900-01-01).
-fn iso_from_ms(ms: f64) -> String {
+pub(crate) fn iso_from_ms(ms: f64) -> String {
     let ms = ms as i64;
     let days = ms.div_euclid(86_400_000);
     let rem = ms.rem_euclid(86_400_000);
@@ -374,7 +557,7 @@ fn iso_from_ms(ms: f64) -> String {
     format!("{y:04}-{m:02}-{d:02}T{h:02}:{mi:02}:{s:02}.{milli:03}Z")
 }
 
-fn pos_err(r: u32, c: u32, what: &str) -> Error {
+pub(crate) fn pos_err(r: u32, c: u32, what: &str) -> Error {
     invalid(format!("row {}, column {}: {}", r + 1, c + 1, what))
 }
 
@@ -384,6 +567,7 @@ unsafe fn write_cell(
     ws: &mut Worksheet,
     date_fmt: &Format,
     datetime_fmt: &Format,
+    col_fmt: bool,
     buf: &mut Vec<u8>,
     r: u32,
     c: u32,
@@ -445,8 +629,13 @@ unsafe fn write_cell(
             if serial < 1.0 {
                 ws.write_string(r, col, iso_from_ms(ms)).map(|_| ())
             } else {
-                let fmt = if ms.rem_euclid(MS_PER_DAY) == 0.0 { date_fmt } else { datetime_fmt };
-                ws.write_number_with_format(r, col, serial, fmt).map(|_| ())
+                if col_fmt {
+                    // The column declares its own number format (say 'dd/mm/yyyy'); the cell adopts it.
+                    ws.write_number(r, col, serial).map(|_| ())
+                } else {
+                    let fmt = if ms.rem_euclid(MS_PER_DAY) == 0.0 { date_fmt } else { datetime_fmt };
+                    ws.write_number_with_format(r, col, serial, fmt).map(|_| ())
+                }
             }
         }
         sys::ValueType::napi_symbol => return Err(pos_err(r, c, "unsupported value type symbol")),

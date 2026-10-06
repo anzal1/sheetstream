@@ -9,6 +9,24 @@
  */
 export declare const __napiBindingTarget: 'native' | 'wasm32-wasi' | 'wasm32-wasip1'
 
+export declare class NativeCsvReader {
+  constructor(path: string, delimiter?: string | undefined | null, quote?: string | undefined | null, batchSize?: number | undefined | null, inferTypes?: boolean | undefined | null)
+  /** Resolves to an array of row arrays, or null when the file is exhausted. */
+  next(): Promise<unknown>
+  /** Stops the worker early and releases the file. */
+  close(): void
+}
+
+export declare class NativeCsvWriter {
+  constructor(path: string, delimiter?: string | undefined | null, quote?: string | undefined | null, bom?: boolean | undefined | null, columns?: Array<string> | undefined | null, headers?: Array<string> | undefined | null, header?: boolean | undefined | null)
+  /** Writes one batch of rows (arrays or plain objects). Returns rows written. */
+  writeRows(rows: unknown[]): number
+  /** Flushes and closes the file. */
+  close(): WriteResult
+  /** Closes the file and deletes the partial output. */
+  abort(): void
+}
+
 export declare class NativeReader {
   /** `sheet_name` wins over `sheet_index`; with neither, the first sheet is read. */
   constructor(path: string, sheetIndex?: number | undefined | null, sheetName?: string | undefined | null, batchSize?: number | undefined | null)
@@ -21,7 +39,7 @@ export declare class NativeReader {
 export declare class NativeWriter {
   constructor(path: string, mode?: string | undefined | null)
   /** Adds a sheet and returns its index. */
-  addSheet(name: string, columns?: Array<string> | undefined | null, header?: boolean | undefined | null): number
+  addSheet(name: string, columns?: Array<string> | undefined | null, header?: boolean | undefined | null, options?: NativeSheetOptions | undefined | null): number
   /** Writes one batch of rows (arrays or plain objects). Returns rows written. */
   writeRows(sheet: number, rows: unknown[]): number
   /** Drops the workbook and its temp files without writing anything. */
@@ -31,6 +49,26 @@ export declare class NativeWriter {
 }
 
 export declare function listSheets(path: string): Promise<unknown>
+
+/** Per-column worksheet formatting, taken from `columns: [{ key, width, numFmt }]`. */
+export interface NativeColumn {
+  width?: number
+  numFmt?: string
+}
+
+export interface NativeSheetOptions {
+  /** Header text per column when it differs from the keys. */
+  headers?: Array<string>
+  columnFormats?: Array<NativeColumn>
+  headerBold?: boolean
+  /** 0xRRGGBB */
+  headerFill?: number
+  /** 0xRRGGBB */
+  headerFontColor?: number
+  headerBorder?: boolean
+  freezeHeader?: boolean
+  autoFilter?: boolean
+}
 
 export interface SheetInfo {
   name: string

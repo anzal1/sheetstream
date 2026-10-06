@@ -33,9 +33,39 @@ enum Msg {
     Err(String),
 }
 
-struct Shared {
+pub(crate) struct Shared {
     rx: Mutex<Option<Receiver<Msg>>>,
     cancel: AtomicBool,
+}
+
+/// Runs `work` on a worker thread that feeds a small bounded channel; JS pulls one batch per `next()`.
+pub(crate) fn spawn_reader<F>(work: F) -> Arc<Shared>
+where
+    F: FnOnce(&AtomicBool, &dyn Fn(Rows) -> bool) -> std::result::Result<(), String> + Send + 'static,
+{
+    let (tx, rx) = sync_channel::<Msg>(3);
+    let shared = Arc::new(Shared { rx: Mutex::new(Some(rx)), cancel: AtomicBool::new(false) });
+    let worker = shared.clone();
+    std::thread::Builder::new()
+        .name("sheetstream-reader".into())
+        .spawn(move || {
+            let res = work(&worker.cancel, &|rows| tx.send(Msg::Rows(rows)).is_ok());
+            let _ = match res {
+                Ok(()) => tx.send(Msg::Done),
+                Err(e) => tx.send(Msg::Err(e)),
+            };
+        })
+        .expect("failed to spawn reader thread");
+    shared
+}
+
+impl Shared {
+    pub(crate) fn close(&self) {
+        self.cancel.store(true, Ordering::SeqCst);
+        if let Ok(mut g) = self.rx.try_lock() {
+            *g = None;
+        }
+    }
 }
 
 #[napi]
@@ -49,21 +79,7 @@ impl NativeReader {
     #[napi(constructor)]
     pub fn new(path: String, sheet_index: Option<u32>, sheet_name: Option<String>, batch_size: Option<u32>) -> Self {
         let batch = batch_size.unwrap_or(1000).max(1) as usize;
-        let (tx, rx) = sync_channel::<Msg>(3);
-        let shared = Arc::new(Shared { rx: Mutex::new(Some(rx)), cancel: AtomicBool::new(false) });
-        let worker = shared.clone();
-        std::thread::Builder::new()
-            .name("sheetstream-reader".into())
-            .spawn(move || {
-                let res = read_sheet(&path, sheet_index, sheet_name, batch, &worker.cancel, &|rows| {
-                    tx.send(Msg::Rows(rows)).is_ok()
-                });
-                let _ = match res {
-                    Ok(()) => tx.send(Msg::Done),
-                    Err(e) => tx.send(Msg::Err(e)),
-                };
-            })
-            .expect("failed to spawn reader thread");
+        let shared = spawn_reader(move |cancel, send| read_sheet(&path, sheet_index, sheet_name, batch, cancel, send));
         NativeReader { shared }
     }
 
@@ -76,15 +92,12 @@ impl NativeReader {
     /// Stops the worker early and releases the file.
     #[napi]
     pub fn close(&self) {
-        self.shared.cancel.store(true, Ordering::SeqCst);
-        if let Ok(mut g) = self.shared.rx.try_lock() {
-            *g = None;
-        }
+        self.shared.close();
     }
 }
 
 pub struct NextTask {
-    shared: Arc<Shared>,
+    pub(crate) shared: Arc<Shared>,
 }
 
 impl<'task> ScopedTask<'task> for NextTask {
@@ -188,7 +201,7 @@ fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
 }
 
 /// Parses `YYYY-MM-DD` or `YYYY-MM-DDTHH:MM:SS[.fff][Z]` (the t="d" cell form).
-fn parse_iso(s: &str) -> Option<f64> {
+pub(crate) fn parse_iso(s: &str) -> Option<f64> {
     let b = s.as_bytes();
     if b.len() < 10 || b[4] != b'-' || b[7] != b'-' {
         return None;
