@@ -1,6 +1,6 @@
 {
   "name": "sheetstream",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Streaming XLSX and CSV read and write for Node.js and Bun, written in Rust. Never holds all rows in JS.",
   "repository": {
     "type": "git",
