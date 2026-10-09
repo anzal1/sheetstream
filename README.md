@@ -8,7 +8,7 @@ Read and write XLSX and CSV files of any size from Node.js without ever holding 
 
 v0.3. Prebuilt binaries for macOS (arm64, x64), Linux (x64 glibc, x64 musl, arm64 glibc) and Windows (x64) ship inside the package, so there is nothing to compile on install. Bun should work through its napi support but isn't tested yet. Not built yet: Linux arm64 with musl (Alpine on ARM).
 
-New in 0.2: light formatting for XLSX (header style, column widths and number formats, frozen header, header filter) and streaming CSV read and write. See [Formatting](#formatting) and [CSV](#csv).
+New in 0.3: [`csvStream`](#csvstreamrows-options), CSV as a Node stream with real backpressure. New in 0.2: light formatting for XLSX (header style, column widths and number formats, frozen header, header filter) and streaming CSV read and write. See [Formatting](#formatting) and [CSV](#csv).
 
 Native code (Rust, through napi-rs) does the parsing and zipping. Rows go in and out in batches of 1000 by default, so a million-row file costs tens of megabytes, not gigabytes.
 
