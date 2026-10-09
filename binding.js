@@ -778,6 +778,7 @@ function __napiStampBindingTarget(exportsObject, target) {
 // linked import resolves to `undefined`.
 module.exports.__napiBindingTarget = __napiStampBindingTarget(nativeBinding, __napiLoadedBindingTarget)
 module.exports = nativeBinding
+module.exports.NativeCsvEncoder = nativeBinding.NativeCsvEncoder
 module.exports.NativeCsvReader = nativeBinding.NativeCsvReader
 module.exports.NativeCsvWriter = nativeBinding.NativeCsvWriter
 module.exports.NativeReader = nativeBinding.NativeReader

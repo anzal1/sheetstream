@@ -6,11 +6,11 @@
 use std::fs::File;
 use std::io::Write;
 use std::ptr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use csv::{ByteRecord, ReaderBuilder, Terminator, WriterBuilder};
-use napi::bindgen_prelude::{Array, AsyncTask};
+use napi::bindgen_prelude::{Array, AsyncTask, Buffer};
 use napi::{sys, Env, Error, Result, Status};
 use napi_derive::napi;
 
@@ -64,18 +64,18 @@ fn fmt_date(ms: f64, out: &mut String) {
     }
 }
 
-struct CsvSink {
-    w: csv::Writer<File>,
+struct CsvSink<W: Write> {
+    w: csv::Writer<W>,
     num: String,
 }
 
-impl CsvSink {
+impl<W: Write> CsvSink<W> {
     fn field(&mut self, bytes: &[u8], r: u32, c: u32) -> Result<()> {
         self.w.write_field(bytes).map_err(|e| pos_err(r, c, &e.to_string()))
     }
 }
 
-impl Sink for CsvSink {
+impl<W: Write> Sink for CsvSink<W> {
     fn begin(&mut self, _core: &Core, _will_header: bool) -> Result<()> {
         Ok(())
     }
@@ -150,7 +150,7 @@ impl Sink for CsvSink {
 
 struct CsvState {
     core: Core,
-    sink: CsvSink,
+    sink: CsvSink<File>,
     strbuf: Vec<u8>,
     path: String,
 }
@@ -227,6 +227,105 @@ impl NativeCsvWriter {
             drop(st);
             let _ = std::fs::remove_file(path);
         }
+    }
+}
+
+/// A byte sink the csv writer owns while the encoder keeps a handle to drain it (csv::Writer has no `get_mut`).
+#[derive(Clone, Default)]
+struct SharedBuf(Arc<Mutex<Vec<u8>>>);
+
+impl Write for SharedBuf {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// In-memory twin of `NativeCsvWriter` for `csvStream`: same sink, same csv crate encoder, but each call
+/// returns the bytes produced so far as a Buffer instead of writing to a file.
+#[napi]
+pub struct NativeCsvEncoder {
+    core: Core,
+    sink: CsvSink<SharedBuf>,
+    out: SharedBuf,
+    strbuf: Vec<u8>,
+    bom_pending: bool,
+    finished: bool,
+}
+
+impl NativeCsvEncoder {
+    /// Flushes the csv crate's buffer and hands back everything produced since the last call.
+    fn take(&mut self) -> Result<Buffer> {
+        self.sink.w.flush().map_err(io_err)?;
+        let mut out = std::mem::take(&mut *self.out.0.lock().unwrap());
+        if self.bom_pending {
+            self.bom_pending = false;
+            let mut with_bom = Vec::with_capacity(out.len() + 3);
+            with_bom.extend_from_slice(b"\xEF\xBB\xBF");
+            with_bom.append(&mut out);
+            out = with_bom;
+        }
+        Ok(Buffer::from(out))
+    }
+}
+
+#[napi]
+impl NativeCsvEncoder {
+    #[napi(constructor)]
+    pub fn new(
+        delimiter: Option<String>,
+        quote: Option<String>,
+        bom: Option<bool>,
+        columns: Option<Vec<String>>,
+        headers: Option<Vec<String>>,
+        header: Option<bool>,
+    ) -> Result<Self> {
+        let delimiter = one_byte(delimiter, b',', "delimiter")?;
+        let quote = one_byte(quote, b'"', "quote")?;
+        let out = SharedBuf::default();
+        let w = WriterBuilder::new()
+            .delimiter(delimiter)
+            .quote(quote)
+            .flexible(true)
+            .terminator(Terminator::Any(b'\n'))
+            .buffer_capacity(1 << 16)
+            .from_writer(out.clone());
+        Ok(NativeCsvEncoder {
+            core: Core::new(columns, headers, header),
+            sink: CsvSink { w, num: String::with_capacity(32) },
+            out,
+            strbuf: Vec::with_capacity(4096),
+            bom_pending: bom == Some(true),
+            finished: false,
+        })
+    }
+
+    /// Encodes one batch of rows (arrays or plain objects) and returns the CSV bytes for it.
+    #[napi]
+    pub fn encode(&mut self, env: &Env, rows: Array) -> Result<Buffer> {
+        if self.finished {
+            return Err(invalid("encoder is finished".into()));
+        }
+        drive_rows(env, &mut self.core, &mut self.sink, &mut self.strbuf, rows)?;
+        self.take()
+    }
+
+    /// Returns whatever is left: the header (and BOM) when no row ever arrived, otherwise nothing.
+    #[napi]
+    pub fn finish(&mut self) -> Result<Buffer> {
+        if self.finished {
+            return Err(invalid("encoder is already finished".into()));
+        }
+        self.finished = true;
+        if !self.core.started {
+            let want = self.core.header != Some(false) && self.core.next_row == 0;
+            self.core.start(&mut self.sink, want)?;
+        }
+        self.take()
     }
 }
 

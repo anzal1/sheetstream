@@ -9,6 +9,18 @@
  */
 export declare const __napiBindingTarget: 'native' | 'wasm32-wasi' | 'wasm32-wasip1'
 
+/**
+ * In-memory twin of `NativeCsvWriter` for `csvStream`: same sink, same csv crate encoder, but each call
+ * returns the bytes produced so far as a Buffer instead of writing to a file.
+ */
+export declare class NativeCsvEncoder {
+  constructor(delimiter?: string | undefined | null, quote?: string | undefined | null, bom?: boolean | undefined | null, columns?: Array<string> | undefined | null, headers?: Array<string> | undefined | null, header?: boolean | undefined | null)
+  /** Encodes one batch of rows (arrays or plain objects) and returns the CSV bytes for it. */
+  encode(rows: unknown[]): Buffer
+  /** Returns whatever is left: the header (and BOM) when no row ever arrived, otherwise nothing. */
+  finish(): Buffer
+}
+
 export declare class NativeCsvReader {
   constructor(path: string, delimiter?: string | undefined | null, quote?: string | undefined | null, batchSize?: number | undefined | null, inferTypes?: boolean | undefined | null)
   /** Resolves to an array of row arrays, or null when the file is exhausted. */

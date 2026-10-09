@@ -3,7 +3,7 @@
 const fs = require('node:fs')
 const os = require('node:os')
 const path = require('node:path')
-const { PassThrough } = require('node:stream')
+const { PassThrough, Readable } = require('node:stream')
 const native = require('./binding.js')
 
 const DEFAULT_BATCH = 1000
@@ -373,6 +373,134 @@ async function writeCsv(filePath, rows, options = {}) {
   return w.close()
 }
 
+/**
+ * Node Readable of CSV bytes, produced as the consumer reads. Same options and bytes as writeCsv, but
+ * nothing touches disk and the source is only pulled while the consumer keeps up: when `push()` says the
+ * buffer is full we stop iterating, and the next `_read()` resumes. Each batch is encoded natively by the
+ * same csv crate writer that writeCsv uses.
+ */
+function csvStream(rows, options = {}) {
+  const sync = !isAsyncIterable(rows) && isIterable(rows)
+  if (!sync && !isAsyncIterable(rows)) throw new TypeError('rows must be an Iterable or AsyncIterable')
+  const batchSize = checkBatchSize(options.batchSize)
+  const { keys, headers } = normalizeColumns(options.columns)
+  const enc = new native.NativeCsvEncoder(
+    checkChar(options.delimiter, 'delimiter'),
+    checkChar(options.quote, 'quote'),
+    checkBool(options.bom, 'bom'),
+    keys,
+    headers,
+    options.header ?? null,
+  )
+  const hwm = options.highWaterMark === undefined ? 65536 : options.highWaterMark
+  if (!Number.isInteger(hwm) || hwm < 1) throw new TypeError('highWaterMark must be a positive integer')
+  const signal = options.signal
+  let it = null // opened on the first read, so an unread stream never starts the source
+  let exhausted = false
+  let pulling = false
+  let inFlight = false // an async next() is pending
+  let sourceThrew = false
+  let wanted = false // _read() arrived while a pull was already running
+  let sliceStart = performance.now()
+
+  const pull = async () => {
+    if (pulling) return
+    pulling = true
+    try {
+      if (it === null) it = sync ? rows[Symbol.iterator]() : rows[Symbol.asyncIterator]()
+      while (!out.destroyed) {
+        const batch = []
+        while (batch.length < batchSize) {
+          let r
+          sourceThrew = true // cleared below unless next() throws
+          if (sync) {
+            r = it.next()
+          } else {
+            inFlight = true
+            try {
+              r = await it.next()
+            } finally {
+              inFlight = false
+            }
+          }
+          sourceThrew = false
+          if (out.destroyed) return
+          if (r.done) {
+            exhausted = true
+            break
+          }
+          batch.push(r.value)
+        }
+        if (signal && signal.aborted) throw signal.reason ?? new Error('aborted')
+        let more = true
+        if (batch.length) {
+          const chunk = enc.encode(batch)
+          wanted = false // any _read() before this push is answered by it
+          if (chunk.length) more = out.push(chunk)
+        }
+        if (exhausted) {
+          const tail = enc.finish()
+          if (tail.length) out.push(tail)
+          out.push(null)
+          return
+        }
+        // A sync source feeding a sync consumer can keep this whole loop (and the stream's own flow loop that
+        // calls _read) on one tick forever, so hand control back to the event loop every few milliseconds.
+        // sliceStart lives outside pull() because pull() itself returns and is re-entered by that flow loop.
+        if (performance.now() - sliceStart > SLICE_MS) {
+          await yieldToLoop()
+          sliceStart = performance.now()
+        }
+        // The consumer can drain the buffer and call _read() while we were yielding above. That call was
+        // ignored (pulling is true) and Node will not call _read() again until we push, so honour it here.
+        if (!more && !wanted) return
+      }
+    } catch (err) {
+      if (sourceThrew) exhausted = true // a throwing iterator is already finished, there is nothing to return()
+      out.destroy(err)
+    } finally {
+      pulling = false
+    }
+  }
+
+  const onAbort = () => out.destroy(signal.reason ?? new Error('aborted'))
+
+  const out = new Readable({
+    highWaterMark: hwm,
+    read() {
+      if (pulling) wanted = true
+      else pull()
+    },
+    destroy(err, cb) {
+      if (signal) signal.removeEventListener('abort', onAbort)
+      if (it === null || exhausted) return cb(err)
+      exhausted = true
+      // return() runs the source's finally blocks. If a next() is still pending it queues behind that call,
+      // which could be a long wait, so don't hold up 'close' for it.
+      let closing
+      try {
+        closing = it.return?.()
+      } catch (e) {
+        return cb(err ?? e)
+      }
+      if (inFlight || !closing || typeof closing.then !== 'function') {
+        if (closing && typeof closing.catch === 'function') closing.catch(() => {})
+        return cb(err)
+      }
+      closing.then(
+        () => cb(err),
+        (e) => cb(err ?? e),
+      )
+    },
+  })
+
+  if (signal) {
+    if (signal.aborted) onAbort()
+    else signal.addEventListener('abort', onAbort, { once: true })
+  }
+  return out
+}
+
 class CsvReadStream extends BatchStream {
   constructor(filePath, options = {}) {
     super()
@@ -398,6 +526,7 @@ function readCsv(filePath, options) {
 }
 
 exports.writeCsv = writeCsv
+exports.csvStream = csvStream
 exports.readCsv = readCsv
 exports.CsvReadStream = CsvReadStream
 exports.writeXlsx = writeXlsx

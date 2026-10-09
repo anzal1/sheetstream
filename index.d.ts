@@ -121,6 +121,14 @@ export interface CsvWriteOptions {
   signal?: AbortSignal
 }
 
+export interface CsvStreamOptions extends CsvWriteOptions {
+  /**
+   * Bytes the stream may buffer before it stops pulling rows from the source. Default 65536. The source runs
+   * at most this far (plus one batch) ahead of the consumer.
+   */
+  highWaterMark?: number
+}
+
 export interface CsvReadOptions {
   /** One ASCII character. Default ','. */
   delimiter?: string
@@ -147,6 +155,15 @@ export function writeCsv(
   rows: Iterable<Row> | AsyncIterable<Row>,
   options?: CsvWriteOptions,
 ): Promise<WriteResult>
+
+/**
+ * Node Readable of CSV bytes with real backpressure: rows are pulled from the source, encoded natively and
+ * pushed only as fast as the consumer reads. Byte-identical to writeCsv for the same rows and options.
+ * Aborting `signal`, destroying the stream or a throwing source stops the iteration (the source's iterator
+ * gets `return()`), and a throwing source or an abort destroys the stream with that error.
+ * `Readable.toWeb(csvStream(rows))` gives a web ReadableStream.
+ */
+export function csvStream(rows: Iterable<Row> | AsyncIterable<Row>, options?: CsvStreamOptions): Readable
 
 /** Async-iterable of row batches. Empty fields read as null; rows shorter than the first row are padded with null. */
 export function readCsv(path: string, options: CsvReadOptions & { header: false }): XlsxReadStream<CsvRowArray>

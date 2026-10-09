@@ -43,7 +43,7 @@ Copy-paste recipes for Express, Next.js, Hono, NestJS, Postgres cursors and larg
 ## API
 
 ```ts
-import { writeXlsx, readXlsx, XlsxWriter, listSheets, xlsxStream, toBuffer, writeCsv, readCsv } from 'sheetstream'
+import { writeXlsx, readXlsx, XlsxWriter, listSheets, xlsxStream, toBuffer, writeCsv, csvStream, readCsv } from 'sheetstream'
 ```
 
 ### `writeXlsx(path, rows, options?)`
@@ -139,7 +139,7 @@ All of it works in `'constant'` and `'lowMemory'` modes and costs no extra memor
 ## CSV
 
 ```js
-import { writeCsv, readCsv } from 'sheetstream'
+import { writeCsv, csvStream, readCsv } from 'sheetstream'
 
 await writeCsv('users.csv', rows(), { delimiter: ';', bom: true })
 
@@ -161,6 +161,49 @@ Both stream through the Rust `csv` crate in constant memory: 1M rows by 10 colum
 | `batchSize` | `1000` | Rows per native call. |
 | `signal` | none | An `AbortSignal`. A failed or aborted write deletes the partial file. |
 
+### `csvStream(rows, options?)`
+
+A Node `Readable` of CSV bytes, for piping into an HTTP response or any other writable. Unlike `xlsxStream` nothing goes through a temp file: CSV has no central directory, so bytes leave as rows are consumed.
+
+```js
+import http from 'node:http'
+import { pipeline } from 'node:stream/promises'
+import { csvStream } from 'sheetstream'
+
+http.createServer(async (req, res) => {
+  res.setHeader('content-type', 'text/csv; charset=utf-8')
+  res.setHeader('content-disposition', 'attachment; filename="users.csv"')
+  try {
+    await pipeline(csvStream(db.users.cursor(), { bom: true }), res)
+  } catch {
+    // the client went away, or the source threw: both streams are already destroyed
+  }
+}).listen(3000)
+```
+
+It takes the same options as `writeCsv` and produces the same bytes for the same rows, encoded by the same Rust `csv` writer. `rows` can be an array, a sync or async iterable, or a Node `Readable` in object mode. One extra option, `highWaterMark` (default `65536`), is how many bytes the stream buffers before it stops pulling rows.
+
+Backpressure is real. The stream asks the source for rows only while its buffer has room, encodes them a batch at a time, and stops the moment `push()` reports the buffer is full. When the consumer is slow, for example a client on a bad connection, `res.write()` backs up, the readable stops reading, and the source stops running. At most `highWaterMark` bytes plus one batch are ever held, so a million rows stream in flat memory. In the test suite, a source that could yield 1M rows stays under 8,100 rows ahead of a deliberately slow writable, and 1M rows by 10 columns peaks under the same 150 MB RSS limit as `writeCsv`.
+
+Stopping early is clean:
+
+- `stream.destroy()`, or the client disconnecting under `pipeline`, calls `return()` on the source's iterator, so a generator's `finally` block runs and a database cursor can close.
+- An error thrown by the source destroys the stream with that error.
+- `signal` aborts the stream with `signal.reason` and also closes the source, even if it is stuck waiting on something.
+- The source is not touched until the first read.
+
+For web-style handlers (Hono, Next.js route handlers, Workers-style runtimes on Node), convert it with `Readable.toWeb`:
+
+```js
+import { Readable } from 'node:stream'
+
+export function GET() {
+  return new Response(Readable.toWeb(csvStream(rows())), {
+    headers: { 'content-type': 'text/csv; charset=utf-8' },
+  })
+}
+```
+
 `readCsv(path, options?)` returns an async iterable of batches, like `readXlsx`, with `.toArray()` for small files.
 
 | Option | Default | Meaning |
@@ -178,7 +221,7 @@ Streaming is the default and the only thing the library does on its own. `toArra
 
 Memory you should still expect:
 
-- CSV reading and writing hold one batch and a 64 KB buffer.
+- CSV reading and writing hold one batch and a 64 KB buffer. `csvStream` holds one batch plus up to `highWaterMark` bytes of output.
 - Writing in `'constant'` mode holds one batch plus a small zip buffer. The sheet XML goes to a temp file (about 5 times the final file size, 525 MB for the million-row benchmark file) before it is compressed into the output, so the temp directory needs the disk space.
 - Writing in `'lowMemory'` mode also keeps the table of distinct strings in RAM. It is cheap for repeated values and costly for a million unique strings.
 - Reading holds the file's shared strings table in RAM (the whole table, not just the strings in the current batch). Files written in `'constant'` mode have none.
@@ -224,6 +267,7 @@ Reading details: leading blank rows are skipped, interior blank rows are kept as
 | Freeze header row | supported, basic |
 | Filter on the header row | supported, basic |
 | CSV read and write, streaming | yes |
+| CSV as a Node `Readable` with backpressure (`csvStream`) | yes |
 | Per-cell or per-row styles, fonts beyond the header, conditional formats, autofit | not yet |
 | Formulas (writing them) | not yet |
 | Merged cells, freeze panes other than the first row | not yet |

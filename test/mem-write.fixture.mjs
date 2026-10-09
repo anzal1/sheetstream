@@ -2,13 +2,15 @@
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { writeXlsx, writeCsv } from '../index.js'
+import { Writable } from 'node:stream'
+import { pipeline } from 'node:stream/promises'
+import { writeXlsx, writeCsv, csvStream } from '../index.js'
 import { rows } from '../bench/gen.mjs'
 
 const n = Number(process.argv[2] || 1_000_000)
 const mode = process.argv[3] || 'constant'
 // 'plain' = v0.1 behaviour, 'formatted' = column widths and number formats on all 10 columns plus a styled,
-// frozen, filtered header, 'csv' = the CSV writer.
+// frozen, filtered header, 'csv' = the CSV writer, 'csvstream' = csvStream piped into a sink that discards.
 const variant = process.argv[4] || 'plain'
 const columns = [
   { key: 'id', header: 'ID', width: 10, numFmt: '0' },
@@ -31,10 +33,25 @@ const timer = setInterval(() => {
   sampledMax = Math.max(sampledMax, process.memoryUsage().rss)
 }, 50)
 const t0 = performance.now()
+async function viaStream() {
+  let bytes = 0
+  let lines = 0
+  const sink = new Writable({
+    write(chunk, _enc, cb) {
+      bytes += chunk.length
+      for (let i = chunk.indexOf(10); i !== -1; i = chunk.indexOf(10, i + 1)) lines++
+      cb()
+    },
+  })
+  await pipeline(csvStream(rows(n), { columns, header: true }), sink)
+  return { rows: lines, bytes }
+}
 const res =
   variant === 'csv'
     ? await writeCsv(file, rows(n), { columns, header: true })
-    : await writeXlsx(file, rows(n), variant === 'formatted' ? { mode, ...formatted } : { mode })
+    : variant === 'csvstream'
+      ? await viaStream()
+      : await writeXlsx(file, rows(n), variant === 'formatted' ? { mode, ...formatted } : { mode })
 clearInterval(timer)
 sampledMax = Math.max(sampledMax, process.memoryUsage().rss)
 const out = {

@@ -12,13 +12,14 @@ const cases = [
   ['constant', 'plain', 'writing 1M rows x 10 cols'],
   ['constant', 'formatted', 'writing 1M rows x 10 cols with column formats and headerStyle'],
   ['constant', 'csv', 'writing 1M rows x 10 cols as CSV'],
+  ['constant', 'csvstream', 'streaming 1M rows x 10 cols through csvStream'],
 ]
 for (const [mode, variant, label] of cases) {
   test(`${label} keeps RSS under ${LIMIT_MB} MB (${variant})`, { timeout: 120_000 }, () => {
     const out = execFileSync(process.execPath, [fixture, '1000000', mode, variant], { encoding: 'utf8' })
     const r = JSON.parse(out.trim().split('\n').pop())
     console.log(`  ${variant}: ${r.rows} rows in ${r.seconds.toFixed(1)} s, ${(r.bytes / 1e6).toFixed(0)} MB file, sampled max RSS ${r.sampledMaxRssMB.toFixed(0)} MB, peak ${r.peakRssMB.toFixed(0)} MB`)
-    assert.equal(r.rows, 1_000_001 - (variant === 'plain' ? 1 : 0))
+    assert.equal(r.rows, 1_000_001 - (variant === 'plain' ? 1 : 0)) // header row included, except 'plain' (array rows)
     assert.ok(r.sampledMaxRssMB < LIMIT_MB, `sampled RSS ${r.sampledMaxRssMB} MB`)
     assert.ok(r.peakRssMB < LIMIT_MB, `peak RSS ${r.peakRssMB} MB`)
   })
